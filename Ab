@@ -1,0 +1,27 @@
+from django.views.generic import TemplateView
+from .cmdb_compliance import host_stats
+from .models import ComplianceRule, Cluster  # ou ton modèle cluster
+
+
+class ComplianceView(TemplateView):
+    template_name = "compliance/dashboard.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        # Récupération de tous les clusters
+        clusters = Cluster.objects.all()
+        cluster_stats = {}
+
+        for cluster in clusters:
+            # Calcul des stats pour ce cluster (filtre sur le nom ou id)
+            stats_list = host_stats(queryset=cluster.host_set.all())
+
+            # Tri : d'abord règles sans condition, puis avec condition
+            sorted_stats = sorted(stats_list, key=lambda s: 1 if s["rule"].has_conditions else 0)
+
+            # Stockage dans le dictionnaire avec le nom du cluster comme clé
+            cluster_stats[cluster.name] = sorted_stats
+
+        context["cluster_stats"] = cluster_stats
+        return context
