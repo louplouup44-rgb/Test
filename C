@@ -1,0 +1,52 @@
+from .models import ComplianceRule, classify_object
+from django.contrib.contenttypes.models import ContentType
+
+
+def host_stats(model_class=None, queryset=None):
+    """
+    Calcule les statistiques de conformité par règle et par modèle.
+
+    :param model_class: Classe du modèle (ex: Server)
+    :param queryset: Queryset filtré, ex: Server.objects.filter(cluster=1)
+    :return: liste de dicts {"rule": ..., "model": ..., "counts": ..., "objects": ...}
+    """
+    stats = []
+    rules = ComplianceRule.objects.all()
+
+    # Filtrer par modèle si précisé
+    if model_class:
+        if isinstance(model_class, str):
+            rules = rules.filter(content_type__model=model_class.lower())
+        else:
+            rules = rules.filter(content_type__model=model_class._meta.model_name)
+
+    for rule in rules:
+        model_cls = rule.content_type.model_class()
+
+        # Si on a fourni un queryset compatible, on l'utilise
+        if queryset is not None and getattr(queryset, "model", None) == model_cls:
+            objects = queryset
+        else:
+            objects = model_cls.objects.all()
+
+        # On classe les objets
+        buckets = {"target": [], "acceptable": [], "obsolete": []}
+
+        for obj in objects:
+            cat = classify_object(obj, rule)
+            buckets[cat].append(obj)
+
+        total = sum(len(v) for v in buckets.values())
+
+        stats.append({
+            "rule": rule,
+            "model": model_cls.__name__,
+            "counts": {k: len(v) for k, v in buckets.items()},
+            "percent_target": (len(buckets["target"]) / total * 100) if total else 0,
+            "percent_acceptable": (len(buckets["acceptable"]) / total * 100) if total else 0,
+            "percent_obsolete": (len(buckets["obsolete"]) / total * 100) if total else 0,
+            "total": total,
+            "objects": buckets,  # utile si tu veux lister les hosts selon le statut
+        })
+
+    return stats
