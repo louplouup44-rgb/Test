@@ -1,0 +1,31 @@
+def classify_object(obj, rule):
+    """
+    Classe un objet selon la règle.
+    - Si la règle a des conditions complexes, on évalue chaque condition.
+    - Sinon, on utilise la logique simple target/acceptable.
+    """
+    if rule.has_conditions:
+        statuses = []
+        for cond in rule.conditions.all():
+            value = getattr(obj, cond.field, None)
+            # Ici on décide si la valeur correspond à target ou acceptable
+            if cond.operator == "eq" and value == cond.value:
+                statuses.append("target")
+            elif cond.operator in ["in", "eq"] and (
+                (isinstance(cond.value, list) and value in cond.value) or value == cond.value
+            ):
+                statuses.append("acceptable")
+            else:
+                statuses.append("obsolete")
+
+        # Maintenant on combine les statuts
+        if all(s == "target" for s in statuses):
+            return "target"
+        elif all(s in ["target", "acceptable"] for s in statuses):
+            return "acceptable"
+        else:
+            return "obsolete"
+
+    else:
+        value = getattr(obj, rule.field, None)
+        return classify_value(value, rule)
