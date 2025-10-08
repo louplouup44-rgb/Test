@@ -1,31 +1,168 @@
+# cmdb_compliance.py
+
+from django.db import models
+from django.contrib.contenttypes.models import ContentType
+import operator
+from packaging import version
+
+# ---------- Modèles ----------
+
+class ComplianceRule(models.Model):
+    """
+    Règle de conformité simple
+    - target_value : valeur exacte
+    - acceptable_value : valeur ou liste de valeurs acceptables
+    - conditions : conditions complexes optionnelles
+    """
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    field = models.CharField(max_length=100)
+    target_value = models.CharField(max_length=255, null=True, blank=True)
+    acceptable_value = models.JSONField(null=True, blank=True)
+    description = models.TextField(blank=True)
+
+    def __str__(self):
+        return f"{self.content_type.model}.{self.field}"
+
+    @property
+    def has_conditions(self):
+        return self.conditions.exists()
+
+
+class ComplianceCondition(models.Model):
+    """
+    Condition avancée pour filtrer plusieurs champs
+    Exemple: cpu in [2,3], os in ['Ubuntu','Debian']
+    """
+    OPS = [
+        ("eq", "Equal"),
+        ("neq", "Not equal"),
+        ("in", "In list"),
+        ("nin", "Not in list"),
+        ("gte", "Greater or equal"),
+        ("lte", "Less or equal"),
+    ]
+
+    rule = models.ForeignKey(ComplianceRule, related_name="conditions", on_delete=models.CASCADE)
+    field = models.CharField(max_length=100)
+    operator = models.CharField(max_length=10, choices=OPS)
+    value = models.JSONField(help_text="Valeur ou liste (ex: 2 ou [2,3] ou ['Ubuntu','Debian'])")
+
+    def __str__(self):
+        return f"{self.field} {self.operator} {self.value}"
+
+
+# ---------- Fonctions d'évaluation ----------
+
+OPS = {
+    "eq": operator.eq,
+    "neq": operator.ne,
+    "in": lambda a, b: a in b,
+    "nin": lambda a, b: a not in b,
+    "gte": lambda a, b: version.parse(str(a)) >= version.parse(str(b)),
+    "lte": lambda a, b: version.parse(str(a)) <= version.parse(str(b)),
+}
+
+
+def evaluate_condition(value, cond):
+    """
+    Retourne le statut d'une condition pour une valeur donnée.
+    - 'target' si exactement conforme
+    - 'acceptable' si valeur différente mais valide (pour l'instant équivalent à target)
+    - 'obsolete' sinon
+    """
+    if value is None:
+        return "obsolete"
+    cmp = OPS[cond.operator]
+    try:
+        if cmp(value, cond.value):
+            return "target"
+        return "acceptable"
+    except Exception:
+        return "obsolete"
+
+
+def classify_value(value, rule):
+    """
+    Version simple (règle sur un seul champ)
+    - target_value exact → 'target'
+    - acceptable_value (liste ou simple) → 'acceptable'
+    - sinon → 'obsolete'
+    """
+    if value == rule.target_value:
+        return "target"
+    elif isinstance(rule.acceptable_value, list) and value in rule.acceptable_value:
+        return "acceptable"
+    elif value == rule.acceptable_value:
+        return "acceptable"
+    return "obsolete"
+
+
 def classify_object(obj, rule):
     """
-    Classe un objet selon la règle.
-    - Si la règle a des conditions complexes, on évalue chaque condition.
-    - Sinon, on utilise la logique simple target/acceptable.
+    Classe un objet selon une règle.
+    - Si conditions complexes → évalue chaque condition
+    - Sinon → version simple target/acceptable
     """
     if rule.has_conditions:
         statuses = []
         for cond in rule.conditions.all():
             value = getattr(obj, cond.field, None)
-            # Ici on décide si la valeur correspond à target ou acceptable
-            if cond.operator == "eq" and value == cond.value:
-                statuses.append("target")
-            elif cond.operator in ["in", "eq"] and (
-                (isinstance(cond.value, list) and value in cond.value) or value == cond.value
-            ):
-                statuses.append("acceptable")
-            else:
-                statuses.append("obsolete")
-
-        # Maintenant on combine les statuts
+            status = evaluate_condition(value, cond)
+            statuses.append(status)
+        # Combiner les statuts
         if all(s == "target" for s in statuses):
             return "target"
         elif all(s in ["target", "acceptable"] for s in statuses):
             return "acceptable"
         else:
             return "obsolete"
-
     else:
         value = getattr(obj, rule.field, None)
         return classify_value(value, rule)
+
+
+# ---------- Statistiques par hôte / modèle ----------
+
+def host_stats(model_class=None, queryset=None):
+    """
+    Calcule les stats de conformité par règle et par modèle.
+    :param model_class: Classe ou nom de modèle
+    :param queryset: Queryset filtré pour appliquer la règle
+    :return: liste de dicts avec counts, pourcentage et objets classés
+    """
+    stats = []
+    rules = ComplianceRule.objects.all()
+
+    if model_class:
+        if isinstance(model_class, str):
+            rules = rules.filter(content_type__model=model_class.lower())
+        else:
+            rules = rules.filter(content_type__model=model_class._meta.model_name)
+
+    for rule in rules:
+        model_cls = rule.content_type.model_class()
+        if queryset is not None and getattr(queryset, "model", None) == model_cls:
+            objects = queryset
+        else:
+            objects = model_cls.objects.all()
+
+        buckets = {"target": [], "acceptable": [], "obsolete": []}
+
+        for obj in objects:
+            category = classify_object(obj, rule)
+            buckets[category].append(obj)
+
+        total = sum(len(v) for v in buckets.values())
+
+        stats.append({
+            "rule": rule,
+            "model": model_cls.__name__,
+            "counts": {k: len(v) for k, v in buckets.items()},
+            "percent_target": (len(buckets["target"]) / total * 100) if total else 0,
+            "percent_acceptable": (len(buckets["acceptable"]) / total * 100) if total else 0,
+            "percent_obsolete": (len(buckets["obsolete"]) / total * 100) if total else 0,
+            "total": total,
+            "objects": buckets,  # utile pour dashboard / liens cliquables
+        })
+
+    return stats
