@@ -63,24 +63,6 @@ OPS = {
 }
 
 
-def evaluate_condition(value, cond):
-    """
-    Retourne le statut d'une condition pour une valeur donnée.
-    - 'target' si exactement conforme
-    - 'acceptable' si valeur différente mais valide (pour l'instant équivalent à target)
-    - 'obsolete' sinon
-    """
-    if value is None:
-        return "obsolete"
-    cmp = OPS[cond.operator]
-    try:
-        if cmp(value, cond.value):
-            return "target"
-        return "acceptable"
-    except Exception:
-        return "obsolete"
-
-
 def classify_value(value, rule):
     """
     Version simple (règle sur un seul champ)
@@ -97,19 +79,53 @@ def classify_value(value, rule):
     return "obsolete"
 
 
+def evaluate_condition(obj, cond, rule=None):
+    """
+    Évalue une condition pour un objet.
+    Retourne 'target', 'acceptable' ou 'obsolete'.
+    - Si rule et cond.field correspond à rule.field, on prend target_value / acceptable_value en priorité
+    - Sinon, on applique l'opérateur de la condition
+    """
+    value = getattr(obj, cond.field, None)
+    if value is None:
+        return "obsolete"
+
+    cmp = OPS[cond.operator]
+
+    # Vérifie target_value si défini et si le champ correspond
+    if rule and cond.field == rule.field and rule.target_value is not None:
+        if value == rule.target_value:
+            return "target"
+
+    # Vérifie acceptable_value si défini et si le champ correspond
+    if rule and cond.field == rule.field and rule.acceptable_value is not None:
+        if isinstance(rule.acceptable_value, list) and value in rule.acceptable_value:
+            return "acceptable"
+        elif value == rule.acceptable_value:
+            return "acceptable"
+
+    # Évaluation de la condition
+    try:
+        if cmp(value, cond.value):
+            return "target"
+        else:
+            return "acceptable"
+    except Exception:
+        return "obsolete"
+
+
 def classify_object(obj, rule):
     """
-    Classe un objet selon une règle.
-    - Si conditions complexes → évalue chaque condition
+    Classe un objet selon la règle.
+    - Si conditions complexes → évalue toutes les conditions
     - Sinon → version simple target/acceptable
     """
     if rule.has_conditions:
         statuses = []
         for cond in rule.conditions.all():
-            value = getattr(obj, cond.field, None)
-            status = evaluate_condition(value, cond)
+            status = evaluate_condition(obj, cond, rule)
             statuses.append(status)
-        # Combiner les statuts
+
         if all(s == "target" for s in statuses):
             return "target"
         elif all(s in ["target", "acceptable"] for s in statuses):
