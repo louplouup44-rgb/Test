@@ -1,0 +1,151 @@
+# cmdb_compliance.py
+
+from django.db import models
+from django.contrib.contenttypes.models import ContentType
+
+
+# ---------- Modèles ----------
+
+class ComplianceRule(models.Model):
+    """
+    Règle de conformité simple :
+    - Vérifie un champ d’un modèle (field)
+    - Peut avoir des valeurs cibles et acceptables
+    - Peut avoir des conditions de contexte (facultatives)
+    """
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    field = models.CharField(max_length=100)
+    target_value = models.CharField(max_length=255, null=True, blank=True)
+    acceptable_value = models.JSONField(null=True, blank=True)
+    description = models.TextField(blank=True)
+
+    def __str__(self):
+        return f"{self.content_type.model}.{self.field}"
+
+    @property
+    def has_conditions(self):
+        return self.conditions.exists()
+
+
+class ComplianceCondition(models.Model):
+    """
+    Condition facultative d’application d’une règle.
+    Peut cibler un champ local ou une relation.
+    Exemple :
+      - fonction = "server"
+      - cluster__site = "Paris"
+    """
+    rule = models.ForeignKey(ComplianceRule, related_name="conditions", on_delete=models.CASCADE)
+    field_path = models.CharField(max_length=255, help_text="Chemin Django ORM (ex: fonction ou cluster__site)")
+    value = models.CharField(max_length=255, help_text="Valeur d'égalité")
+
+    def __str__(self):
+        return f"{self.field_path} = {self.value}"
+
+
+# ---------- Fonctions de logique ----------
+
+def matches_conditions(obj, rule):
+    """
+    Vérifie si un objet correspond aux conditions de la règle.
+    Les conditions sont optionnelles :
+      - s’il n’y en a pas → True
+      - sinon → toutes doivent être égales
+    """
+    if not rule.has_conditions:
+        return True
+
+    for cond in rule.conditions.all():
+        current = obj
+        try:
+            for part in cond.field_path.split("__"):
+                current = getattr(current, part)
+                if current is None:
+                    return False
+        except AttributeError:
+            return False
+
+        if str(current) != str(cond.value):
+            return False
+
+    return True
+
+
+def classify_value(value, rule):
+    """
+    Évalue la conformité d'une valeur simple.
+    """
+    if value == rule.target_value:
+        return "target"
+    elif isinstance(rule.acceptable_value, list) and value in rule.acceptable_value:
+        return "acceptable"
+    elif value == rule.acceptable_value:
+        return "acceptable"
+    return "obsolete"
+
+
+def classify_object(obj, rule):
+    """
+    Classe un objet selon la règle :
+      - Si l’objet ne correspond pas aux conditions : None (règle non applicable)
+      - Sinon, on évalue le champ cible
+    """
+    if not matches_conditions(obj, rule):
+        return None
+
+    try:
+        value = getattr(obj, rule.field)
+    except AttributeError:
+        return None
+
+    return classify_value(value, rule)
+
+
+# ---------- Statistiques ----------
+
+def host_stats(model_class=None, queryset=None):
+    """
+    Calcule les stats de conformité (target / acceptable / obsolete / not_applicable)
+    pour un modèle ou un queryset donné.
+    """
+    from .models import ComplianceRule  # éviter import circulaire
+    stats = []
+    rules = ComplianceRule.objects.all()
+
+    # Filtrage par modèle
+    if model_class:
+        if isinstance(model_class, str):
+            rules = rules.filter(content_type__model=model_class.lower())
+        else:
+            rules = rules.filter(content_type__model=model_class._meta.model_name)
+
+    for rule in rules:
+        model_cls = rule.content_type.model_class()
+        if queryset is not None and getattr(queryset, "model", None) == model_cls:
+            objects = queryset
+        else:
+            objects = model_cls.objects.all()
+
+        buckets = {"target": [], "acceptable": [], "obsolete": [], "not_applicable": []}
+
+        for obj in objects:
+            category = classify_object(obj, rule)
+            if category is None:
+                buckets["not_applicable"].append(obj)
+            else:
+                buckets[category].append(obj)
+
+        total = sum(len(v) for k, v in buckets.items() if k != "not_applicable")
+
+        stats.append({
+            "rule": rule,
+            "model": model_cls.__name__,
+            "counts": {k: len(v) for k, v in buckets.items()},
+            "percent_target": (len(buckets["target"]) / total * 100) if total else 0,
+            "percent_acceptable": (len(buckets["acceptable"]) / total * 100) if total else 0,
+            "percent_obsolete": (len(buckets["obsolete"]) / total * 100) if total else 0,
+            "total": total,
+            "objects": buckets,
+        })
+
+    return stats
