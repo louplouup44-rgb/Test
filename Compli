@@ -1,0 +1,97 @@
+from django.db import models
+from django.contrib.contenttypes.models import ContentType
+from packaging import version
+import operator
+
+
+class ComplianceRule(models.Model):
+    """
+    Règle de conformité simple (champs directs)
+    + relation vers des conditions complexes optionnelles
+    """
+    content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
+    field = models.CharField(max_length=100)
+    target_value = models.CharField(max_length=255, null=True, blank=True)
+    acceptable_value = models.JSONField(null=True, blank=True)  # peut contenir une ou plusieurs valeurs
+    obsolete_value = models.JSONField(null=True, blank=True)
+    description = models.TextField(blank=True)
+
+    def __str__(self):
+        return f"{self.content_type.model}.{self.field}"
+
+    @property
+    def has_conditions(self):
+        return self.conditions.exists()
+
+
+class ComplianceCondition(models.Model):
+    """
+    Condition avancée pour filtrer plusieurs champs
+    Exemple: cpu in [2,3], os in ['Ubuntu', 'Debian']
+    """
+    OPS = [
+        ("eq", "Equal"),
+        ("neq", "Not equal"),
+        ("in", "In list"),
+        ("nin", "Not in list"),
+        ("gte", "Greater or equal"),
+        ("lte", "Less or equal"),
+    ]
+
+    rule = models.ForeignKey(ComplianceRule, related_name="conditions", on_delete=models.CASCADE)
+    field = models.CharField(max_length=100)
+    operator = models.CharField(max_length=10, choices=OPS)
+    value = models.JSONField(help_text="Valeur ou liste (ex: 2 ou [2,3] ou ['Ubuntu','Debian'])")
+
+    def __str__(self):
+        return f"{self.field} {self.operator} {self.value}"
+
+
+# ---------- Fonctions d'évaluation ----------
+
+OPS = {
+    "eq": operator.eq,
+    "neq": operator.ne,
+    "in": lambda a, b: a in b,
+    "nin": lambda a, b: a not in b,
+    "gte": lambda a, b: version.parse(str(a)) >= version.parse(str(b)),
+    "lte": lambda a, b: version.parse(str(a)) <= version.parse(str(b)),
+}
+
+
+def classify_value(value, rule):
+    """Version simple (field unique)"""
+    if value == rule.target_value:
+        return "target"
+    elif isinstance(rule.acceptable_value, list) and value in rule.acceptable_value:
+        return "acceptable"
+    elif value == rule.acceptable_value:
+        return "acceptable"
+    elif isinstance(rule.obsolete_value, list) and value in rule.obsolete_value:
+        return "obsolete"
+    elif value == rule.obsolete_value:
+        return "obsolete"
+    return "obsolete"
+
+
+def evaluate_condition(obj, cond):
+    """Évalue une condition complexe"""
+    value = getattr(obj, cond.field, None)
+    cmp = OPS[cond.operator]
+    if isinstance(cond.value, list):
+        return cmp(value, cond.value)
+    return cmp(value, cond.value)
+
+
+def classify_object(obj, rule):
+    """Combine conditions complexes si présentes"""
+    if rule.has_conditions:
+        results = [evaluate_condition(obj, c) for c in rule.conditions.all()]
+        if all(results):
+            return "target"
+        elif any(results):
+            return "acceptable"
+        return "obsolete"
+    else:
+        value = getattr(obj, rule.field, None)
+        return classify_value(value, rule)
