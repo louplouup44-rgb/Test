@@ -1,0 +1,29 @@
+from django.views.generic import TemplateView
+from .cmdb_compliance import host_stats
+from .models import ComplianceRule
+
+
+class ComplianceView(TemplateView):
+    template_name = "compliance/dashboard.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+
+        all_rules = ComplianceRule.objects.select_related("content_type").prefetch_related("conditions")
+        stats_list = host_stats()  # récupère toutes les stats
+
+        # --- Tri avec lambda : d'abord règles sans condition, puis avec condition ---
+        sorted_stats = sorted(
+            stats_list,
+            key=lambda s: 1 if s["rule"].has_conditions else 0
+        )
+
+        # --- Séparation pour le template (optionnel) ---
+        stats_without_conditions = [s for s in sorted_stats if not s["rule"].has_conditions]
+        stats_with_conditions = [s for s in sorted_stats if s["rule"].has_conditions]
+
+        context.update({
+            "stats_without_conditions": stats_without_conditions,
+            "stats_with_conditions": stats_with_conditions,
+        })
+        return context
