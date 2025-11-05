@@ -1,0 +1,71 @@
+import requests
+import time
+
+class AnsibleTowerClient:
+    def __init__(self, base_url, token):
+        """
+        :param base_url: URL de ton instance AWX / Tower (ex: https://awx.example.com/api/v2)
+        :param token: Token d'authentification (Token d'application ou PAT)
+        """
+        self.base_url = base_url.rstrip('/')
+        self.headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {token}',
+        }
+
+    # --- TEMPLATES ---
+    def list_templates(self):
+        """Retourne la liste des job templates disponibles"""
+        resp = requests.get(f"{self.base_url}/job_templates/", headers=self.headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_template(self, template_id):
+        """Retourne les infos détaillées d’un template"""
+        resp = requests.get(f"{self.base_url}/job_templates/{template_id}/", headers=self.headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_template_prompts(self, template_id):
+        """Retourne les prompts (inventaire, variables, credentials, etc.) nécessaires pour lancer un job"""
+        resp = requests.get(f"{self.base_url}/job_templates/{template_id}/survey_spec/", headers=self.headers)
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+
+    # --- JOB EXECUTION ---
+    def launch_job(self, template_id, extra_vars=None, inventory_id=None):
+        """
+        Lance un job à partir d’un template
+        """
+        payload = {}
+        if extra_vars:
+            payload["extra_vars"] = extra_vars
+        if inventory_id:
+            payload["inventory"] = inventory_id
+
+        resp = requests.post(f"{self.base_url}/job_templates/{template_id}/launch/", 
+                             headers=self.headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()  # Contient l’ID du job lancé
+
+    # --- JOB STATUS ---
+    def get_job_status(self, job_id):
+        """Retourne l’état du job"""
+        resp = requests.get(f"{self.base_url}/jobs/{job_id}/", headers=self.headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    def wait_for_job_completion(self, job_id, interval=5, timeout=600):
+        """
+        Attend la fin du job en vérifiant périodiquement le statut.
+        """
+        start = time.time()
+        while True:
+            job = self.get_job_status(job_id)
+            status = job.get("status")
+            if status in ["successful", "failed", "error", "canceled"]:
+                return job
+            if time.time() - start > timeout:
+                raise TimeoutError("Job timeout exceeded.")
+            time.sleep(interval)
